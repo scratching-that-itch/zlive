@@ -1,0 +1,22 @@
+.{
+    .name = .zlive,
+    .version = "0.1.0",
+    .minimum_zig_version = "0.17.0",
+    .fingerprint = 0x70bfcc0a6666e76,
+    .dependencies = .{
+        // The HTTP/WebSocket transport. zlive owns this dependency so apps
+        // built on the framework never declare or import it themselves
+        // (httpz re-exports websocket.zig transitively).
+        .httpz = .{
+            .url = "git+https://github.com/karlseguin/http.zig#8aeb4e522b122fd2d9ba6731480b5d3878d2845f",
+            .hash = "httpz-0.0.0-PNVzrPoWCQDh-mpVLlE6Ryjobya3u-oDwOTq0aoQHdms",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "README.md",
+        "LICENSE",
+    },
+}

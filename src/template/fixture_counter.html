@@ -1,0 +1,15 @@
+@props {
+    count: i64,
+    items: []const []const u8,
+    show: bool,
+}
+
+<p>count: {props.count}</p>
+@if (props.show) {
+<span>visible</span>
+}
+<ul>
+@for (props.items) |item| {
+<li>{item}</li>
+}
+</ul>
