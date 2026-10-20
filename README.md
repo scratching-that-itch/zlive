@@ -72,13 +72,16 @@ and page, then `render(entry)`. Renders are cached, and a failure fills
 error (`layout.Error`).
 
 The server's page table is `comptime` and embeds each page's bytes, so
-rendering happens at **build time**. `zlive.build.addRenderedPages(b,
-renderer, page_files, out_prefix)` invokes the app's renderer as
-`renderer <entry> <output>` for each entry and copies the output where
-`@embedFile` can see it. The app owns the template sources and the tiny
-renderer (embedding them is what makes the build track them); zlive owns the
-engine and the copy step, mirroring `addTemplates` for the component
-compiler. See `../zlive-examples/src/render_pages.zig` and
+rendering happens at **build time**, and the framework owns the whole
+pipeline. `zlive.build.addRenderedPages(b, zlive_dep, .{ .templates,
+.pages_dir, .entries })` runs the framework's `zlive-render-pages` tool once
+per entry with the app's templates as file inputs (so the build tracks
+them), writes the results to a generated directory in the build cache, and
+returns a module rooted at a generated `pages_rendered.zig` that embeds
+every page with `@embedFile` (one `pub const` per page — `test-morph.html`
+becomes `test_morph`). Nothing generated touches the app's source tree; the
+app only names its templates, pages directory and page entries. This mirrors
+`addTemplates` for the component compiler. See
 `../zlive-examples/build.zig` for the complete usage.
 
 ## The transport (`zlive.http`)

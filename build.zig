@@ -36,6 +36,21 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(compiler_exe);
 
+    // The page renderer runs on the build machine, same as the compiler.
+    // Apps never build it themselves; addRenderedPages fetches the artifact.
+    const pages_renderer_exe = b.addExecutable(.{
+        .name = "zlive-render-pages",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/tools/render_pages.zig"),
+            .target = b.graph.host,
+            .optimize = tool_optimize,
+            .imports = &.{
+                .{ .name = "zlive", .module = zlive },
+            },
+        }),
+    });
+    b.installArtifact(pages_renderer_exe);
+
     // Golden fixture: compile fixture_counter.html, then test the
     // generated code's render + diff output.
     const fixture_templates = addTemplatesWithCompiler(b, compiler_exe, "", &.{
@@ -69,10 +84,24 @@ pub fn build(b: *std.Build) void {
     });
     const run_compiler_tests = b.addRunArtifact(compiler_tests);
 
+    // The page renderer's tests, likewise a build-time executable.
+    const pages_renderer_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/tools/render_pages.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "zlive", .module = zlive },
+            },
+        }),
+    });
+    const run_pages_renderer_tests = b.addRunArtifact(pages_renderer_tests);
+
     const test_step = b.step("test", "Run zlive unit tests");
     test_step.dependOn(&run_tests.step);
     test_step.dependOn(&run_fixture_tests.step);
     test_step.dependOn(&run_compiler_tests.step);
+    test_step.dependOn(&run_pages_renderer_tests.step);
 }
 
 /// Compiles .html template files to .zig files next to the sources
@@ -122,31 +151,87 @@ fn addTemplatesWithCompiler(
     return &usf.step;
 }
 
-/// Renders layout/page templates at build time with an app-supplied tool.
+/// The output of `addRenderedPages`: the step that renders the pages, and
+/// a module that embeds them.
+pub const RenderedPages = struct {
+    step: *std.Build.Step,
+    module: *std.Build.Module,
+};
+
+/// The templates and page entries `addRenderedPages` renders.
+pub const RenderedPagesOptions = struct {
+    /// Layout and include templates the pages may reference, as build paths
+    /// (`b.path("src/templates/base.html")`). The template name pages use in
+    /// `{% extends %}`/`{% include %}` is the file's basename.
+    templates: []const std.Build.LazyPath,
+    /// The directory the page entries live in.
+    pages_dir: std.Build.LazyPath,
+    /// The page entry names within `pages_dir` (`index.html`, ...); each one
+    /// is rendered and embedded.
+    entries: []const []const u8,
+};
+
+/// Renders the app's page templates at build time and returns a module that
+/// embeds them.
 ///
-/// `renderer` is a host executable invoked as
-/// `renderer <entry> <output>`; `page_files` are the entry names passed to
-/// it, and each result is copied to `out_prefix ++ name`, where the app's
-/// `@embedFile` can reach it (embedding is bounded by the module root).
-/// Returns a step that anything embedding the rendered pages must depend on.
+/// The framework owns the whole pipeline: the renderer executable
+/// (`zlive-render-pages`, fetched from `zlive_dep`), the per-entry runs, and
+/// the assembly of the outputs into a generated directory in the build
+/// cache. That directory also gets a generated `pages_rendered.zig` that
+/// embeds every page with `@embedFile` — one `pub const` per page, named
+/// after the file minus its extension with non-alphanumeric characters
+/// mapped to `_` (so `test-morph.html` becomes `test_morph`). The returned
+/// module roots at that file; because a generated directory is its own
+/// module root, the embeds work without any generated files in the app's
+/// source tree.
 ///
-/// The app owns its template sources, its page list and its renderer (which
-/// embeds those sources so the build tracks them); zlive owns the engine
-/// (`zlive.layout`) and this copy step, mirroring `addTemplates` for the
-/// component compiler. See `zlive/README.md` ("Layouts").
+/// The app only declares its data — `options.templates`, `options.pages_dir`
+/// and `options.entries` — and imports the returned module. Template sources
+/// are passed to the renderer as file inputs, so the build tracks them and
+/// re-renders on change. See `zlive/README.md` ("Layouts").
 pub fn addRenderedPages(
     b: *std.Build,
-    renderer: *std.Build.Step.Compile,
-    page_files: []const []const u8,
-    out_prefix: []const u8,
-) *std.Build.Step {
-    const usf = b.addUpdateSourceFiles();
-    for (page_files) |name| {
+    zlive_dep: *std.Build.Dependency,
+    options: RenderedPagesOptions,
+) RenderedPages {
+    const renderer = zlive_dep.artifact("zlive-render-pages");
+
+    const wf = b.addWriteFiles();
+    for (options.entries) |entry| {
         const run = b.addRunArtifact(renderer);
-        run.addArg(name);
-        const output = run.addOutputFileArg(name);
-        const sub_path = std.mem.concat(b.allocator, u8, &.{ out_prefix, name }) catch @panic("OOM");
-        usf.addCopyFileToSource(output, sub_path);
+        run.addArg(entry);
+        const output = run.addOutputFileArg(entry);
+        for (options.templates) |template| {
+            const sub_path = switch (template) {
+                .src_path => |p| p.sub_path,
+                .dependency => |p| p.sub_path,
+                else => @panic("addRenderedPages: templates must be b.path(...) or dep.path(...) source paths"),
+            };
+            run.addPrefixedFileArg(
+                std.fmt.allocPrint(b.allocator, "{s}=", .{std.fs.path.basename(sub_path)}) catch @panic("OOM"),
+                template,
+            );
+        }
+        for (options.entries) |page| {
+            run.addPrefixedFileArg(
+                std.fmt.allocPrint(b.allocator, "{s}=", .{page}) catch @panic("OOM"),
+                options.pages_dir.path(b, page),
+            );
+        }
+        _ = wf.addCopyFile(output, entry);
     }
-    return &usf.step;
+
+    var zig_source: std.ArrayList(u8) = .empty;
+    for (options.entries) |name| {
+        const stem = std.fs.path.stem(name);
+        const ident = b.allocator.alloc(u8, stem.len) catch @panic("OOM");
+        for (stem, 0..) |c, i| ident[i] = if (std.ascii.isAlphanumeric(c)) c else '_';
+        zig_source.print(b.allocator, "pub const {s} = @embedFile(\"{s}\");\n", .{ ident, name }) catch @panic("OOM");
+    }
+    const zig_file = wf.add("pages_rendered.zig", zig_source.items);
+
+    return .{
+        .step = &wf.step,
+        .module = b.createModule(.{ .root_source_file = zig_file }),
+    };
 }

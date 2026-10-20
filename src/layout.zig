@@ -18,8 +18,9 @@
 //! nested blocks work, so a layout can add override points of its own.
 //!
 //! Layout sources and the page list belong to the app; this module is the
-//! mechanism. `zlive.build.addRenderedPages` runs a renderer at build time
-//! and copies the output next to the app's sources, so the server's
+//! mechanism, and `zlive.build.addRenderedPages` owns the pipeline: it runs
+//! the framework's `zlive-render-pages` tool at build time and assembles the
+//! output into a generated module in the build cache, so the server's
 //! `comptime` page table can embed the rendered bytes. A failure carries
 //! the template name, line and reason in `Engine.diag`, so a bad layout
 //! points at the file and line in `zig build`.
