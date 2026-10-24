@@ -2,7 +2,11 @@ const std = @import("std");
 
 /// Protocol version baked into every envelope. Bump when the envelope
 /// shape changes incompatibly; decoders reject mismatched versions.
-pub const version: u32 = 1;
+///
+/// v2: dynamic strings in render trees and patches are tagged objects
+/// (`{"s": ...}` / `{"html": ...}`) instead of plain strings, so the
+/// client can tell them apart from statics (see view.nodeToValue).
+pub const version: u32 = 2;
 
 /// Discriminator for the kind of message an envelope carries.
 /// Serialized as its name in JSON ("publish", "message", ...).
@@ -84,7 +88,7 @@ test "heartbeat round trip" {
     defer allocator.free(json);
 
     try std.testing.expectEqualStrings(
-        "{\"version\":1,\"type\":\"heartbeat\",\"topic\":\"system\",\"event\":\"ping\",\"payload\":null,\"ref\":7}",
+        "{\"version\":2,\"type\":\"heartbeat\",\"topic\":\"system\",\"event\":\"ping\",\"payload\":null,\"ref\":7}",
         json,
     );
 
@@ -189,5 +193,5 @@ test "decode rejects malformed json" {
     const allocator = std.testing.allocator;
 
     try std.testing.expectError(error.Malformed, Envelope.decode(allocator, "not json"));
-    try std.testing.expectError(error.Malformed, Envelope.decode(allocator, "{\"version\":1}"));
+    try std.testing.expectError(error.Malformed, Envelope.decode(allocator, "{\"version\":2}"));
 }

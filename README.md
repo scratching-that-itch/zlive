@@ -17,17 +17,23 @@ app is built on**.
 A view renders to a recursive **segment tree**: each node is a static
 string, a dynamic scalar, or a nested list of child trees (loops and
 component composition). `zlive.diff(old, new)` walks two trees and emits
-path-addressed patches — `{"3.2.1": "new value"}` — so a re-render only
-touches the slots that changed.
+path-addressed patches — `{"3.2.1": {"s": "new value"}}` — so a re-render
+only touches the slots that changed.
 
 ## Wire protocol
 
 Every message is a JSON envelope:
 
 ```json
-{ "version": 1, "type": "message", "topic": "view:counter",
+{ "version": 2, "type": "message", "topic": "view:counter",
   "event": "patch", "payload": {"1": 42}, "ref": 12 }
 ```
+
+In a render tree or patch payload, plain strings are **statics** (trusted
+markup, passed through raw) and objects are **dynamic strings**:
+`{"s": "..."}` is text (HTML-escaped by the client before it reaches the
+DOM), `{"html": "..."}` is the server's explicit raw-markup opt-in
+(`Scalar.html`). Numbers and booleans are dynamic scalars.
 
 `version` is checked on decode; mismatches are rejected. `ref` pairs a
 reply with the request that caused it. See `src/protocol.zig`.
@@ -41,6 +47,11 @@ connect/join, full render on mount, morphdom patches, delegated
 `[data-lv-click]` events with incrementing refs, reconnect with backoff.
 `Live.start({ join: {...} })` merges page-supplied fields into the join
 payload, which is how a page tells the server which group it belongs to.
+
+An element carrying `data-lv-ignore` keeps its children across patches —
+morphdom still morphs its attributes (firing the hook's `updated`) but
+never touches what is inside. That is how a hook hosts a canvas/SVG
+library (e.g. a chart) that draws its own DOM.
 
 ## Layouts (`zlive.layout`)
 

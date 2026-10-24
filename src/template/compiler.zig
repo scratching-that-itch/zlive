@@ -29,6 +29,13 @@
 // when the preceding text ends with '>' and the next line starts with '<'
 // (templates can be written multi-line without introducing whitespace
 // text nodes between elements). Directive lines leave no text behind.
+//
+// Escaping rule: a `{props.x}` / `{item.y}` substitution is *text* — the
+// client HTML-escapes it ({"s": ...} on the wire). An inline `{if ...}`
+// chooses between the template author's own literals — attribute
+// fragments, class names — which are markup by construction and emitted
+// raw ({"html": ...}). An inline if must therefore never select between
+// prop values that carry text.
 
 const std = @import("std");
 
@@ -402,8 +409,14 @@ fn parseComponentCall(line: []const u8) Error!Node {
     } };
 }
 
-fn emitNodes(w: anytype, nodes: []const Node, target: []const u8, indent: usize, counter: *usize) Error!void {
-    for (nodes) |node| {
+/// Inline conditional: `{if (cond) "a" else "b"}`. Its branches are the
+/// template author's own literals — markup by construction, so the segment
+/// is emitted as raw HTML (Segment.html), not as escapable text.
+fn isInlineIf(e: []const u8) bool {
+    return std.mem.startsWith(u8, e, "if ") or std.mem.startsWith(u8, e, "if(");
+}
+
+fn emitNodes(w: anytype, nodes: []const Node, target: []const u8, indent: usize, counter: *usize) Error!void {    for (nodes) |node| {
         switch (node) {
             .text => |t| {
                 if (t.len == 0) continue;
@@ -414,7 +427,16 @@ fn emitNodes(w: anytype, nodes: []const Node, target: []const u8, indent: usize,
             },
             .expr => |e| {
                 try writeIndent(w, indent);
-                try w.print("try {s}.append(allocator, .of({s}));\n", .{ target, e });
+                // Escaping class: an inline {if ...} chooses between the
+                // template author's own literals (attribute fragments,
+                // class names) — markup by construction, emitted raw.
+                // Every other expression ({props.x}, {item.y}) is data and
+                // is HTML-escaped by the client ({"s": ...} on the wire).
+                if (isInlineIf(e)) {
+                    try w.print("try {s}.append(allocator, .html({s}));\n", .{ target, e });
+                } else {
+                    try w.print("try {s}.append(allocator, .of({s}));\n", .{ target, e });
+                }
             },
             .children => {
                 try writeIndent(w, indent);
@@ -541,6 +563,27 @@ test "props block and a simple interpolation" {
         \\<button>{props.label}</button>
     ,
         \\try _segs.append(allocator, .text("<button>"));
+    );
+}
+
+test "escaping classes: props are text, inline ifs are markup" {
+    try expectCompiled(
+        \\@props {
+        \\    label: []const u8,
+        \\    open: bool,
+        \\}
+        \\<button{if (props.open) " aria-expanded=\"true\"" else ""}>{props.label}</button>
+    ,
+        \\try _segs.append(allocator, .html(if (props.open) " aria-expanded=\"true\"" else ""));
+    );
+    try expectCompiled(
+        \\@props {
+        \\    label: []const u8,
+        \\    open: bool,
+        \\}
+        \\<button{if (props.open) " aria-expanded=\"true\"" else ""}>{props.label}</button>
+    ,
+        \\try _segs.append(allocator, .of(props.label));
     );
 }
 

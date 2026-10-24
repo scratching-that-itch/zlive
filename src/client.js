@@ -7,6 +7,11 @@
  *   2. window.Live — the socket client: connect/join, full render on mount,
  *      morphdom patches, delegated [data-lv-click] events with incrementing
  *      refs, and reconnect with exponential backoff.
+ *
+ * Client-owned subtrees: an element carrying data-lv-ignore keeps its
+ * children across patches — morphdom still morphs its attributes (and fires
+ * the hook's `updated`), but never touches what is inside. That is how a
+ * hook can host a canvas/SVG library (a chart) that draws its own DOM.
  */
 (function () {
   'use strict';
@@ -103,10 +108,17 @@
     }[c]));
   }
 
-  // render tree -> HTML: strings (statics) pass through, scalars are escaped
+  // render tree -> HTML: strings are statics (trusted markup, passed
+  // through); objects are dynamic strings — {s: "..."} is text and gets
+  // escaped, {html: "..."} is the server's explicit raw-HTML opt-in;
+  // numbers and booleans are escaped scalars
   function flatten(node) {
     if (Array.isArray(node)) return node.map(flatten).join('');
     if (typeof node === 'string') return node;
+    if (node !== null && typeof node === 'object') {
+      if (node.html !== undefined) return node.html;
+      return escapeHtml(node.s ?? '');
+    }
     return escapeHtml(node);
   }
 
@@ -136,7 +148,7 @@
     if (!state.socket || state.socket.readyState !== WebSocket.OPEN) return null;
     const ref = ++state.ref;
     state.socket.send(JSON.stringify({
-      version: 1, type: 'publish', topic: state.topic,
+      version: 2, type: 'publish', topic: state.topic,
       event: event, payload: payload ?? null, ref: ref,
     }));
     log('sent', '-> #' + ref + ' ' + event);
@@ -157,6 +169,9 @@
       onNodeAdded: (node) => window.LiveHooks.nodeAdded(node),
       onNodeDiscarded: (node) => window.LiveHooks.nodeDiscarded(node),
       onElUpdated: (el) => window.LiveHooks.elUpdated(el),
+      // data-lv-ignore: attributes morph (the hook sees the new spec via
+      // onElUpdated above), but the children belong to client code
+      onBeforeElChildrenUpdated: (el) => !el.hasAttribute('data-lv-ignore'),
     });
   }
 

@@ -66,7 +66,7 @@ test "fixture: appending a loop item patches only the added index" {
     try std.testing.expectEqualStrings("5.2", patches.at(0).path);
 
     const json = try patches.toJson(a);
-    try std.testing.expectEqualStrings("{\"5.2\":[\"<li>\",\"c\",\"</li>\"]}", json);
+    try std.testing.expectEqualStrings("{\"5.2\":[\"<li>\",{\"s\":\"c\"},\"</li>\"]}", json);
 }
 
 test "fixture: generated component satisfies the Component contract" {

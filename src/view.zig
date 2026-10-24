@@ -3,7 +3,12 @@ const std = @import("std");
 /// A dynamic scalar value — the only part of a render tree that can
 /// change between renders. Static text and structure are fixed per tree.
 pub const Scalar = union(enum) {
+    /// Text: escaped on the client before it reaches the DOM.
     string: []const u8,
+    /// Raw HTML: passed through untouched, for the rare dynamic slot that
+    /// is markup by construction (e.g. a table cell that is a button).
+    /// Never feed it derived or user-supplied text.
+    html: []const u8,
     int: i64,
     bool: bool,
 
@@ -11,6 +16,7 @@ pub const Scalar = union(enum) {
         if (std.meta.activeTag(a) != std.meta.activeTag(b)) return false;
         return switch (a) {
             .string => |s| std.mem.eql(u8, s, b.string),
+            .html => |s| std.mem.eql(u8, s, b.html),
             .int => |v| v == b.int,
             .bool => |v| v == b.bool,
         };
@@ -50,6 +56,13 @@ pub const Segment = union(enum) {
                 @compileError("unsupported scalar type: " ++ @typeName(T)),
             else => @compileError("unsupported scalar type: " ++ @typeName(T)),
         };
+    }
+
+    /// A raw-HTML dynamic segment — the explicit opt-in for a slot that is
+    /// markup by construction (see Scalar.html). Everything the client can
+    /// reach as `.string` is escaped; this is not.
+    pub fn html(s: []const u8) Segment {
+        return .{ .dynamic = .{ .html = s } };
     }
 };
 
@@ -101,7 +114,9 @@ pub const PatchSet = struct {
 };
 
 /// Converts a render tree to its JSON form: an array whose elements are
-/// strings (statics), scalars (dynamics), or nested arrays (children).
+/// strings (statics, raw HTML), objects (dynamic strings — `{"s": ...}`
+/// escapes on the client, `{"html": ...}` passes through raw), numbers and
+/// booleans (dynamic scalars), or nested arrays (children).
 /// Ownership of the returned containers transfers to the caller.
 pub fn treeToValue(allocator: std.mem.Allocator, tree: []const Segment) !std.json.Value {
     var arr: std.json.Array = .init(allocator);
@@ -211,7 +226,12 @@ fn nodeToValue(allocator: std.mem.Allocator, seg: Segment) !std.json.Value {
     return switch (seg) {
         .static => |s| .{ .string = s },
         .dynamic => |sc| switch (sc) {
-            .string => |s| .{ .string = s },
+            // Dynamic strings are tagged objects so the client can tell
+            // them apart from statics: "s" is text (escaped client-side),
+            // "html" is raw markup (the explicit opt-in). The wrapped
+            // string is borrowed; the object is owned (freeValue).
+            .string => |s| .{ .object = try oneField(allocator, "s", s) },
+            .html => |s| .{ .object = try oneField(allocator, "html", s) },
             .int => |v| .{ .integer = v },
             .bool => |v| .{ .bool = v },
         },
@@ -221,6 +241,14 @@ fn nodeToValue(allocator: std.mem.Allocator, seg: Segment) !std.json.Value {
             break :blk .{ .array = arr };
         },
     };
+}
+
+/// A one-entry object map around a borrowed string. The key is a literal,
+/// so it outlives the map without copying.
+fn oneField(allocator: std.mem.Allocator, key: []const u8, s: []const u8) !std.json.ObjectMap {
+    var obj: std.json.ObjectMap = .empty;
+    try obj.put(allocator, key, .{ .string = s });
+    return obj;
 }
 
 // A counter render: one static label, one dynamic count.
@@ -275,7 +303,7 @@ test "list middle item change produces exactly one nested patch" {
 
     const json = try patches.toJson(allocator);
     defer allocator.free(json);
-    try std.testing.expectEqualStrings("{\"1.1\":\"B\"}", json);
+    try std.testing.expectEqualStrings("{\"1.1\":{\"s\":\"B\"}}", json);
 }
 
 test "appending an item patches only the added index" {
@@ -303,7 +331,7 @@ test "appending an item patches only the added index" {
     // the patch carries the appended item's whole subtree
     const json = try patches.toJson(allocator);
     defer allocator.free(json);
-    try std.testing.expectEqualStrings("{\"3\":[\"- \",\"d\"]}", json);
+    try std.testing.expectEqualStrings("{\"3\":[\"- \",{\"s\":\"d\"}]}", json);
 }
 
 // Three levels of nesting: page -> rows -> cells, mirroring the
@@ -337,6 +365,27 @@ test "deep nesting addresses cells by full path" {
     const json = try patches.toJson(allocator);
     defer allocator.free(json);
     try std.testing.expectEqualStrings("{\"1.1.1\":99}", json);
+}
+
+test "wire encoding: dynamic strings are tagged, statics stay plain" {
+    const allocator = std.testing.allocator;
+
+    const tree = [_]Segment{
+        .text("<b>"), // static: raw, plain string on the wire
+        .of("a<b"), // dynamic text: tagged "s", escaped by the client
+        .{ .dynamic = .{ .html = "<i>raw</i>" } }, // opt-in raw markup
+        .of(7),
+        .of(true),
+    };
+    const value = try treeToValue(allocator, &tree);
+    defer freeValue(allocator, value);
+
+    const json = try std.json.Stringify.valueAlloc(allocator, value, .{});
+    defer allocator.free(json);
+    try std.testing.expectEqualStrings(
+        "[\"<b>\",{\"s\":\"a<b\"},{\"html\":\"<i>raw</i>\"},7,true]",
+        json,
+    );
 }
 
 test "identical trees produce no patches" {
@@ -407,7 +456,9 @@ fn flattenInto(tree: []const Segment, out: *std.ArrayListUnmanaged(u8), allocato
     for (tree) |seg| switch (seg) {
         .static => |s| try out.appendSlice(allocator, s),
         .dynamic => |d| switch (d) {
-            .string => |s| try out.appendSlice(allocator, s),
+            // server-side flattening is for tests/snapshots: no escaping
+            // (the client escapes {"s": ...} when it builds the DOM)
+            .string, .html => |s| try out.appendSlice(allocator, s),
             .int => |v| {
                 var buf: [24]u8 = undefined;
                 const s = std.fmt.bufPrint(&buf, "{d}", .{v}) catch unreachable;
